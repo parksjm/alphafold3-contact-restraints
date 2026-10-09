@@ -10,6 +10,7 @@
 
 """Data-side of the input features processing."""
 
+from collections.abc import Sequence
 import dataclasses
 import datetime
 import itertools
@@ -1007,6 +1008,125 @@ class TokenFeatures:
         'is_ligand': self.is_ligand,
         'is_nonstandard_polymer_chain': self.is_nonstandard_polymer_chain,
         'is_water': self.is_water,
+    }
+
+
+@chex.dataclass(mappable_dataclass=False, frozen=True)
+class ContactConstraints:
+  """Padded contact-restraint features used only by diffusion guidance."""
+
+  token_indices: xnp_ndarray
+  atom_masks: xnp_ndarray
+  max_distances: xnp_ndarray
+  weights: xnp_ndarray
+  mask: xnp_ndarray
+
+  @classmethod
+  def compute_features(
+      cls,
+      constraints: Sequence[folding_input.ContactConstraint] | None,
+      all_tokens: atom_layout.AtomLayout,
+      all_token_atoms_layout: atom_layout.AtomLayout,
+      max_constraints: int,
+  ) -> Self:
+    """Maps chain/residue/atom identifiers to dense diffusion atom slots."""
+    constraints = constraints or ()
+    if len(constraints) > max_constraints:
+      raise ValueError(
+          f'Got {len(constraints)} contact constraints, but at most '
+          f'{max_constraints} are supported.'
+      )
+
+    max_atoms_per_token = all_token_atoms_layout.shape[1]
+    token_indices = np.zeros((max_constraints, 2), dtype=np.int32)
+    atom_masks = np.zeros(
+        (max_constraints, 2, max_atoms_per_token), dtype=bool
+    )
+    max_distances = np.zeros((max_constraints,), dtype=np.float32)
+    weights = np.zeros((max_constraints,), dtype=np.float32)
+    mask = np.zeros((max_constraints,), dtype=bool)
+
+    def resolve_token(
+        token: folding_input.ContactTokenId,
+    ) -> tuple[int, np.ndarray]:
+      chain_id, res_id, *atom_name = token
+      candidates = np.flatnonzero(
+          (all_tokens.chain_id == chain_id) & (all_tokens.res_id == res_id)
+      )
+      if atom_name:
+        atom = atom_name[0]
+        candidates = np.array([
+            idx
+            for idx in candidates
+            if np.any(all_token_atoms_layout.atom_name[idx] == atom)
+        ])
+      if len(candidates) != 1:
+        atom_hint = (
+            ''
+            if atom_name
+            else ' Specify an atom name for multi-token ligand/non-standard '
+            'residues.'
+        )
+        raise ValueError(
+            f'Contact endpoint {token!r} resolved to {len(candidates)} tokens; '
+            f'exactly one is required.{atom_hint}'
+        )
+
+      token_index = int(candidates[0])
+      names = all_token_atoms_layout.atom_name[token_index]
+      if atom_name:
+        endpoint_atom_mask = names == atom_name[0]
+      else:
+        endpoint_atom_mask = names.astype(bool)
+      return token_index, endpoint_atom_mask
+
+    for idx, constraint in enumerate(constraints):
+      for endpoint_idx, endpoint in enumerate(
+          (constraint.token1, constraint.token2)
+      ):
+        token_index, atom_mask = resolve_token(endpoint)
+        token_indices[idx, endpoint_idx] = token_index
+        atom_masks[idx, endpoint_idx] = atom_mask
+      max_distances[idx] = constraint.max_distance
+      weights[idx] = constraint.weight
+      mask[idx] = True
+
+    return cls(
+        token_indices=token_indices,
+        atom_masks=atom_masks,
+        max_distances=max_distances,
+        weights=weights,
+        mask=mask,
+    )
+
+  @classmethod
+  def from_data_dict(cls, batch: BatchDict) -> Self:
+    if 'contact_constraint_token_indices' not in batch:
+      # Backwards compatibility for precomputed feature dictionaries produced
+      # before contact guidance was added.
+      max_atoms_per_token = batch['pred_dense_atom_mask'].shape[-1]
+      return cls(
+          token_indices=np.zeros((0, 2), dtype=np.int32),
+          atom_masks=np.zeros((0, 2, max_atoms_per_token), dtype=bool),
+          max_distances=np.zeros((0,), dtype=np.float32),
+          weights=np.zeros((0,), dtype=np.float32),
+          mask=np.zeros((0,), dtype=bool),
+      )
+    return cls(
+        token_indices=batch['contact_constraint_token_indices'],
+        atom_masks=batch['contact_constraint_atom_masks'],
+        max_distances=batch['contact_constraint_max_distances'],
+        weights=batch['contact_constraint_weights'],
+        mask=batch['contact_constraint_mask'],
+    )
+
+  def as_data_dict(self) -> BatchDict:
+    return {
+        'contact_constraint_token_indices': self.token_indices,
+        'contact_constraint_atom_masks': self.atom_masks,
+        'contact_constraint_max_distances': self.max_distances,
+        'contact_constraint_weights': self.weights,
+        'contact_constraint_mask': self.mask,
     }
 
 

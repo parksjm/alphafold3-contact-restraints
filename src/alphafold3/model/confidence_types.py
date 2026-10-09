@@ -39,11 +39,20 @@ class StructureConfidenceFullEncoder(json.JSONEncoder):
     pae = np.round(
         np.clip(np.asarray(o.pae, dtype=np.float64), 0.0, 99.9), 1
     ).astype(float)
+    contact_restraint_distances = np.round(
+        np.asarray(o.contact_restraint_distances, dtype=np.float64), 2
+    ).astype(float)
+    contact_restraint_thresholds = np.round(
+        np.asarray(o.contact_restraint_thresholds, dtype=np.float64), 2
+    ).astype(float)
     return """\
 {
   "atom_chain_ids": %s,
   "atom_plddts": %s,
   "contact_probs": %s,
+  "contact_restraint_distances": %s,
+  "contact_restraint_satisfied": %s,
+  "contact_restraint_thresholds": %s,
   "pae": %s,
   "token_chain_ids": %s,
   "token_res_ids": %s
@@ -51,6 +60,9 @@ class StructureConfidenceFullEncoder(json.JSONEncoder):
         super().encode(o.atom_chain_ids),
         super().encode(list(atom_plddts)).replace('NaN', 'null'),
         super().encode([list(x) for x in contact_probs]).replace('NaN', 'null'),
+        super().encode(list(contact_restraint_distances)),
+        super().encode(o.contact_restraint_satisfied),
+        super().encode(list(contact_restraint_thresholds)),
         super().encode([list(x) for x in pae]).replace('NaN', 'null'),
         super().encode(o.token_chain_ids),
         super().encode(o.token_res_ids),
@@ -262,6 +274,15 @@ class StructureConfidenceFull:
   atom_plddts: list[float]
   atom_chain_ids: list[str]
   contact_probs: np.ndarray  # [num_tokens, num_tokens]
+  contact_restraint_distances: list[float] = dataclasses.field(
+      default_factory=list
+  )
+  contact_restraint_thresholds: list[float] = dataclasses.field(
+      default_factory=list
+  )
+  contact_restraint_satisfied: list[bool] = dataclasses.field(
+      default_factory=list
+  )
 
   @classmethod
   def from_inference_result(
@@ -278,6 +299,17 @@ class StructureConfidenceFull:
     if not isinstance(contact_probs, np.ndarray):
       logging.info('%s', type(contact_probs))
       raise TypeError('contact_probs should be a numpy array.')
+
+    contact_restraint_distances = np.asarray(
+        inference_result.numerical_data.get('contact_restraint_distances', [])
+    ).tolist()
+    contact_restraint_thresholds = np.asarray(
+        inference_result.numerical_data.get('contact_restraint_thresholds', [])
+    ).tolist()
+    contact_restraint_satisfied = np.asarray(
+        inference_result.numerical_data.get('contact_restraint_satisfied', []),
+        dtype=bool,
+    ).tolist()
 
     struc = inference_result.predicted_structure
     chain_ids = struc.chain_id.tolist()
@@ -296,6 +328,9 @@ class StructureConfidenceFull:
         atom_plddts=atom_plddts,
         atom_chain_ids=chain_ids,
         contact_probs=contact_probs,
+        contact_restraint_distances=contact_restraint_distances,
+        contact_restraint_thresholds=contact_restraint_thresholds,
+        contact_restraint_satisfied=contact_restraint_satisfied,
     )
 
   @classmethod

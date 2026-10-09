@@ -27,6 +27,7 @@ The custom AlphaFold 3 format allows:
 *   Specifying ligands by defining them using the CCD mmCIF format and supplying
     them via the [user-provided CCD](#user-provided-ccd).
 *   Specifying covalent bonds between entities.
+*   Applying noncovalent contact restraints during diffusion sampling.
 *   Specifying multiple random seeds.
 
 ## AlphaFold Server JSON Compatibility
@@ -114,6 +115,7 @@ The top-level structure of the input JSON is:
     {"ligand": {...}}
   ],
   "bondedAtomPairs": [...],  # Optional.
+  "contactConstraints": [...],  # Optional; this fork only.
   "userCCD": "...",  # Optional, mutually exclusive with userCCDPath.
   "userCCDPath": "...",  # Optional, mutually exclusive with userCCD.
   "dialect": "alphafold3",  # Required.
@@ -134,6 +136,9 @@ The fields specify the following:
 *   `bondedAtomPairs: list[Bond]`: An optional list of covalently bonded atoms.
     These can link atoms within an entity, or across two entities. See more
     below.
+*   `contactConstraints: list[ContactConstraint]`: Optional noncovalent
+    upper-bound distance restraints applied during diffusion sampling. See
+    [Contact restraints](#contact-restraints).
 *   `userCCD: str`: An optional string with user-provided chemical components
     dictionary. This is an expert mode for providing custom molecules when
     SMILES is not sufficient. This should also be used when you have a custom
@@ -619,6 +624,54 @@ Or you can simply fully omit the `templates` field thus setting it implicitly to
   "pairedMsa": ...,
 }
 ```
+
+## Contact restraints
+
+This fork supports up to 64 noncovalent contact restraints per input. They are
+implemented as inference-time diffusion guidance and do not use the covalent
+bond features or change the AlphaFold model parameters.
+
+```json
+"contactConstraints": [
+  {
+    "token1": ["A", 145],
+    "token2": ["B", 37],
+    "maxDistance": 8.0,
+    "weight": 1.0
+  },
+  {
+    "token1": ["A", 82, "NZ"],
+    "token2": ["L", 1, "O1"],
+    "maxDistance": 4.0
+  }
+]
+```
+
+Each endpoint is either `[CHAIN_ID, RESIDUE_ID]` or
+`[CHAIN_ID, RESIDUE_ID, ATOM_NAME]`. Residue IDs are 1-based. A residue-level
+restraint uses the minimum distance between any modeled atom in the two
+residues; an atom-level endpoint restricts that side to the named atom.
+Ligands and flattened non-standard residues that occupy multiple tokens must
+use an atom-level endpoint.
+`maxDistance` is an upper bound in Angstroms and defaults to 6.0. `weight` is a
+positive multiplier on that restraint's potential and defaults to 1.0.
+
+The sampler applies Boltz's flat-bottom linear potential to its denoised
+coordinate estimate. The default schedule follows Boltz's forced-contact
+guidance: 20 inner optimization steps at every diffusion step, recomputing the
+contact gradient every 4 inner steps, with global step size 0.5 early in
+sampling, 0.25 in the middle, and zero in the final quarter. The global
+settings can be changed with
+`--contact_guidance_weight`,
+`--contact_guidance_interval`, and `--contact_guidance_steps`.
+
+Per-sample achieved distances, thresholds, and satisfaction flags are written
+to `confidences.json` as `contact_restraint_distances`,
+`contact_restraint_thresholds`, and `contact_restraint_satisfied`.
+
+This is guidance of a model that was not trained with contact-conditioning
+features. Strong or mutually inconsistent restraints can distort local
+geometry; inspect clashes and confidence as well as restraint satisfaction.
 
 ## Bonds
 

@@ -138,6 +138,24 @@ def get_af3_parser() -> FileArgumentParser:
         help="Number of diffusion samples to generate per seed. Defaults to 5."
     )
     parser.add_argument(
+        "--contact_guidance_weight",
+        type=float,
+        default=0.5,
+        help="Gradient-descent step size for contact-restraint guidance."
+    )
+    parser.add_argument(
+        "--contact_guidance_interval",
+        type=int,
+        default=4,
+        help="Recompute the contact gradient every N inner guidance steps."
+    )
+    parser.add_argument(
+        "--contact_guidance_steps",
+        type=int,
+        default=20,
+        help="Gradient steps per contact-guidance update."
+    )
+    parser.add_argument(
         "--num_seeds",
         type=int,
         default=None,

@@ -16,6 +16,7 @@ import gzip
 import json
 import logging
 import lzma
+import math
 import os
 import pathlib
 import random
@@ -34,6 +35,54 @@ import zstandard as zstd
 
 
 BondAtomId: TypeAlias = tuple[str, int, str]
+ContactTokenId: TypeAlias = tuple[str, int] | tuple[str, int, str]
+
+
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
+class ContactConstraint:
+  """Upper-bound distance restraint between two residue/atom tokens.
+
+  Token identifiers contain ``(chain_id, residue_id)`` for residue-level
+  restraints or ``(chain_id, residue_id, atom_name)`` for atom-level
+  restraints. Residue IDs are 1-indexed.
+  """
+
+  token1: ContactTokenId
+  token2: ContactTokenId
+  max_distance: float = 6.0
+  weight: float = 1.0
+
+  def __post_init__(self):
+    for field_name in ('token1', 'token2'):
+      token = getattr(self, field_name)
+      if not isinstance(token, (list, tuple)) or len(token) not in (2, 3):
+        raise ValueError(
+            f'{field_name} must be [chain_id, residue_id] or '
+            f'[chain_id, residue_id, atom_name], got {token!r}.'
+        )
+      if not isinstance(token[0], str) or not token[0]:
+        raise ValueError(f'{field_name} has an invalid chain ID: {token!r}.')
+      if (
+          not isinstance(token[1], int)
+          or isinstance(token[1], bool)
+          or token[1] < 1
+      ):
+        raise ValueError(f'{field_name} has an invalid residue ID: {token!r}.')
+      if len(token) == 3 and (
+          not isinstance(token[2], str) or not token[2]
+      ):
+        raise ValueError(f'{field_name} has an invalid atom name: {token!r}.')
+      object.__setattr__(self, field_name, tuple(token))
+
+    if not math.isfinite(self.max_distance) or self.max_distance <= 0:
+      raise ValueError(
+          f'max_distance must be a positive finite number, got '
+          f'{self.max_distance!r}.'
+      )
+    if not math.isfinite(self.weight) or self.weight <= 0:
+      raise ValueError(
+          f'weight must be a positive finite number, got {self.weight!r}.'
+      )
 
 JSON_DIALECT: Final[str] = 'alphafold3'
 JSON_VERSIONS: Final[tuple[int, ...]] = (1, 2, 3)
@@ -857,6 +906,9 @@ class Input:
       IDs must be set if there are any bonded atoms. Residue IDs are 1-indexed.
       Atoms in ligands defined by SMILES can't be bonded since SMILES doesn't
       define unique atom names.
+    contact_constraints: Optional upper-bound distance restraints applied by
+      inference-time diffusion guidance. Each endpoint can identify a residue
+      or a specific atom within a residue.
     user_ccd: Optional user-defined chemical component dictionary in the CIF
       format. This can be used to provide additional CCD entries that are not
       present in the default CCD and thus define arbitrary new ligands. This is
@@ -868,6 +920,7 @@ class Input:
   chains: Sequence[ProteinChain | RnaChain | DnaChain | Ligand]
   rng_seeds: Sequence[int]
   bonded_atom_pairs: Sequence[tuple[BondAtomId, BondAtomId]] | None = None
+  contact_constraints: Sequence[ContactConstraint] | None = None
   user_ccd: str | None = None
 
   def __post_init__(self):
@@ -893,6 +946,29 @@ class Input:
       object.__setattr__(
           self, 'bonded_atom_pairs', tuple(self.bonded_atom_pairs)
       )
+    if self.contact_constraints is not None:
+      object.__setattr__(
+          self, 'contact_constraints', tuple(self.contact_constraints)
+      )
+
+      chain_lengths = {chain.id: len(chain) for chain in self.chains}
+      for constraint in self.contact_constraints:
+        if not isinstance(constraint, ContactConstraint):
+          raise TypeError(
+              'contact_constraints entries must be ContactConstraint objects, '
+              f'got {type(constraint).__name__}.'
+          )
+        for token in (constraint.token1, constraint.token2):
+          if token[0] not in chain_lengths:
+            raise ValueError(
+                f'Invalid chain ID {token[0]!r} in contact constraint '
+                f'{constraint!r}.'
+            )
+          if token[1] > chain_lengths[token[0]]:
+            raise ValueError(
+                f'Invalid residue ID {token[1]} for chain {token[0]!r} in '
+                f'contact constraint {constraint!r}.'
+            )
 
     if self.user_ccd is not None:
       for component_name, component_cif in cif_dict.parse_multi_data_cif(
@@ -1027,6 +1103,7 @@ class Input:
             'modelSeeds',
             'sequences',
             'bondedAtomPairs',
+            'contactConstraints',
             'userCCD',
             'userCCDPath',
         },
@@ -1145,6 +1222,35 @@ class Input:
       if len(bonded_atom_pairs) != len(set(bonded_atom_pairs)):
         raise ValueError(f'Bonds are not unique: {bonded_atom_pairs}')
 
+    contact_constraints = None
+    raw_constraints = raw_json.get('contactConstraints')
+    if raw_constraints is not None:
+      if not isinstance(raw_constraints, list):
+        raise ValueError('contactConstraints must be a list.')
+      contact_constraints = []
+      for raw_constraint in raw_constraints:
+        if not isinstance(raw_constraint, dict):
+          raise ValueError(
+              'Each contact constraint must be an object, got '
+              f'{raw_constraint!r}.'
+          )
+        _validate_keys(
+            raw_constraint.keys(),
+            {'token1', 'token2', 'maxDistance', 'weight'},
+        )
+        if 'token1' not in raw_constraint or 'token2' not in raw_constraint:
+          raise ValueError(
+              'Each contact constraint must define token1 and token2.'
+          )
+        contact_constraints.append(
+            ContactConstraint(
+                token1=raw_constraint['token1'],
+                token2=raw_constraint['token2'],
+                max_distance=float(raw_constraint.get('maxDistance', 6.0)),
+                weight=float(raw_constraint.get('weight', 1.0)),
+            )
+        )
+
     user_ccd = raw_json.get('userCCD')
     user_ccd_path = raw_json.get('userCCDPath')
     if user_ccd and user_ccd_path:
@@ -1159,6 +1265,7 @@ class Input:
         chains=chains,
         rng_seeds=[int(seed) for seed in raw_json['modelSeeds']],
         bonded_atom_pairs=bonded_atom_pairs,
+        contact_constraints=contact_constraints,
         user_ccd=user_ccd,
     )
 
@@ -1359,6 +1466,18 @@ class Input:
       chain = deduped_chains[chain_content_hash]
       sequences.append(chain.to_dict(seq_id=ids if len(ids) > 1 else ids[0]))
 
+    contact_constraints = None
+    if self.contact_constraints is not None:
+      contact_constraints = [
+          {
+              'token1': constraint.token1,
+              'token2': constraint.token2,
+              'maxDistance': constraint.max_distance,
+              'weight': constraint.weight,
+          }
+          for constraint in self.contact_constraints
+      ]
+
     alphafold_json = json.dumps(
         {
             'dialect': JSON_DIALECT,
@@ -1367,6 +1486,7 @@ class Input:
             'sequences': sequences,
             'modelSeeds': self.rng_seeds,
             'bondedAtomPairs': self.bonded_atom_pairs,
+            'contactConstraints': contact_constraints,
             'userCCD': self.user_ccd,
         },
         indent=2,

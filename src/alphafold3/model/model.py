@@ -315,6 +315,11 @@ class Model(hk.Module):
         embeddings,
         sample_config=self.config.heads.diffusion.eval,
     )
+    contact_restraint_distances = jax.vmap(
+        lambda positions: diffusion_head.contact_restraint_min_distances(
+            positions, batch.contact_constraints
+        )
+    )(samples['atom_positions'])
 
     # Compute dist_error_fn over all samples for distance error logging.
     confidence_output = mapping.sharded_map(
@@ -336,6 +341,7 @@ class Model(hk.Module):
 
     output = {
         'diffusion_samples': samples,
+        'contact_restraint_distances': contact_restraint_distances,
         'distogram': distogram,
         **confidence_output,
     }
@@ -499,6 +505,15 @@ class Model(hk.Module):
     actifptm_xchain = confidences.get_iptm_xchain(chain_pair_actifptm)
 
     for idx, pred_structure in enumerate(pred_structures):
+      contact_constraint_mask = np.asarray(batch.contact_constraints.mask).astype(
+          bool
+      )
+      contact_restraint_distances = result['contact_restraint_distances'][
+          idx, contact_constraint_mask
+      ]
+      contact_restraint_thresholds = np.asarray(
+          batch.contact_constraints.max_distances
+      )[contact_constraint_mask]
       ranking_score = confidences.get_ranking_score(
           ptm=ptm[idx],
           iptm=iptm[idx],
@@ -511,6 +526,11 @@ class Model(hk.Module):
               'full_pde': result['full_pde'][idx, :num_tokens, :num_tokens],
               'full_pae': result['full_pae'][idx, :num_tokens, :num_tokens],
               'contact_probs': contact_probs[:num_tokens, :num_tokens],
+              'contact_restraint_distances': contact_restraint_distances,
+              'contact_restraint_thresholds': contact_restraint_thresholds,
+              'contact_restraint_satisfied': (
+                  contact_restraint_distances <= contact_restraint_thresholds
+              ),
           },
           metadata={
               'predicted_distance_error': predicted_distance_errors[idx],

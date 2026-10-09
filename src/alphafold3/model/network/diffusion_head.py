@@ -90,6 +90,22 @@ class ConditioningConfig(base_config.BaseConfig):
   prob: float
 
 
+class ContactGuidanceConfig(base_config.BaseConfig):
+  """Inference-time flat-bottom contact-restraint guidance."""
+
+  guidance_weight: float = 0.5
+  guidance_interval: int = 4
+  num_gradient_steps: int = 20
+
+  def __post_init__(self):
+    if self.guidance_weight < 0:
+      raise ValueError('guidance_weight must be non-negative.')
+    if self.guidance_interval < 1:
+      raise ValueError('guidance_interval must be at least 1.')
+    if self.num_gradient_steps < 1:
+      raise ValueError('num_gradient_steps must be at least 1.')
+
+
 class SampleConfig(base_config.BaseConfig):
   steps: int
   gamma_0: float = 0.8
@@ -97,6 +113,7 @@ class SampleConfig(base_config.BaseConfig):
   noise_scale: float = 1.003
   step_scale: float = 1.5
   num_samples: int = 1
+  contact_guidance: ContactGuidanceConfig = base_config.autocreate()
 
 
 class DiffusionHead(hk.Module):
@@ -294,6 +311,60 @@ class DiffusionHead(hk.Module):
     ) * atom_mask[..., None]
 
 
+def contact_restraint_min_distances(
+    positions: jnp.ndarray,
+    constraints,
+) -> jnp.ndarray:
+  """Returns the minimum valid atom-pair distance for each restraint."""
+  token_indices = constraints.token_indices
+  endpoint1 = positions[token_indices[:, 0]]
+  endpoint2 = positions[token_indices[:, 1]]
+  displacements = endpoint1[:, :, None, :] - endpoint2[:, None, :, :]
+  distances = jnp.sqrt(jnp.sum(jnp.square(displacements), axis=-1) + 1e-8)
+  atom_pair_mask = (
+      constraints.atom_masks[:, 0, :, None]
+      & constraints.atom_masks[:, 1, None, :]
+  )
+  distances = jnp.where(atom_pair_mask, distances, 1e6)
+  return jnp.min(distances, axis=(-2, -1))
+
+
+def contact_restraint_energy(
+    positions: jnp.ndarray,
+    constraints,
+) -> jnp.ndarray:
+  """Computes Boltz-style flat-bottom linear upper-bound restraint energy."""
+  min_distances = contact_restraint_min_distances(positions, constraints)
+  violations = jnp.maximum(min_distances - constraints.max_distances, 0.0)
+  active = constraints.mask.astype(positions.dtype)
+  return jnp.sum(active * constraints.weights * violations)
+
+
+def apply_contact_guidance(
+    positions: jnp.ndarray,
+    constraints,
+    *,
+    guidance_weight: jnp.ndarray,
+    guidance_interval: int,
+    num_gradient_steps: int,
+) -> jnp.ndarray:
+  """Runs gradient descent on the contact potential for an x0 prediction."""
+
+  def guidance_step(step_index, guided_positions):
+    return jax.lax.cond(
+        step_index % guidance_interval == 0,
+        lambda x: x
+        - guidance_weight
+        * jax.grad(contact_restraint_energy)(x, constraints),
+        lambda x: x,
+        guided_positions,
+    )
+
+  return jax.lax.fori_loop(
+      0, num_gradient_steps, guidance_step, positions
+  )
+
+
 def sample(
     denoising_step: Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray],
     batch: feat_batch.Batch,
@@ -321,7 +392,8 @@ def sample(
 
   mask = batch.predicted_structure_info.atom_mask
 
-  def apply_denoising_step(carry, noise_level):
+  def apply_denoising_step(carry, scan_input):
+    noise_level, step_index = scan_input
     key, positions, noise_level_prev = carry
     key, key_noise, key_aug = jax.random.split(key, 3)
 
@@ -337,6 +409,35 @@ def sample(
     positions_noisy = positions + noise
 
     positions_denoised = denoising_step(positions_noisy, t_hat)
+
+    guidance_config = config.contact_guidance
+    steering_t = 1.0 - step_index / config.steps
+    scheduled_weight = jnp.where(
+        steering_t > 0.75,
+        guidance_config.guidance_weight,
+        jnp.where(
+            steering_t > 0.25,
+            0.5 * guidance_config.guidance_weight,
+            0.0,
+        ),
+    )
+    apply_guidance = (
+        (step_index < config.steps - 1)
+        & (scheduled_weight > 0)
+        & jnp.any(batch.contact_constraints.mask)
+    )
+    positions_denoised = jax.lax.cond(
+        apply_guidance,
+        lambda x: apply_contact_guidance(
+            x,
+            batch.contact_constraints,
+            guidance_weight=scheduled_weight,
+            guidance_interval=guidance_config.guidance_interval,
+            num_gradient_steps=guidance_config.num_gradient_steps,
+        ),
+        lambda x: x,
+        positions_denoised,
+    )
     grad = (positions_noisy - positions_denoised) / t_hat
 
     d_t = noise_level - t_hat
@@ -361,7 +462,8 @@ def sample(
   apply_denoising_step = hk.vmap(
       apply_denoising_step, in_axes=(0, None), split_rng=(not hk.running_init())
   )
-  result, _ = hk.scan(apply_denoising_step, init, noise_levels[1:], unroll=4)
+  scan_inputs = (noise_levels[1:], jnp.arange(config.steps))
+  result, _ = hk.scan(apply_denoising_step, init, scan_inputs, unroll=4)
   _, positions_out, _ = result
 
   final_dense_atom_mask = jnp.tile(mask[None], (num_samples, 1, 1))

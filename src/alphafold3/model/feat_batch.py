@@ -24,6 +24,7 @@ class Batch:
   token_features: features.TokenFeatures
   ref_structure: features.RefStructure
   predicted_structure_info: features.PredictedStructureInfo
+  contact_constraints: features.ContactConstraints
   polymer_ligand_bond_info: features.PolymerLigandBondInfo
   ligand_ligand_bond_info: features.LigandLigandBondInfo
   pseudo_beta_info: features.PseudoBetaInfo
@@ -46,6 +47,7 @@ class Batch:
         predicted_structure_info=features.PredictedStructureInfo.from_data_dict(
             batch
         ),
+        contact_constraints=features.ContactConstraints.from_data_dict(batch),
         polymer_ligand_bond_info=features.PolymerLigandBondInfo.from_data_dict(
             batch
         ),
@@ -66,6 +68,7 @@ class Batch:
         **self.token_features.as_data_dict(),
         **self.ref_structure.as_data_dict(),
         **self.predicted_structure_info.as_data_dict(),
+        **self.contact_constraints.as_data_dict(),
         **self.polymer_ligand_bond_info.as_data_dict(),
         **self.ligand_ligand_bond_info.as_data_dict(),
         **self.pseudo_beta_info.as_data_dict(),

@@ -134,6 +134,7 @@ class WholePdbPipeline:
     max_paired_sequence_per_species: int = 600
     drop_ligand_leaving_atoms: bool = True
     average_num_atoms_per_token: int = 24
+    max_contact_constraints: int = 64
     atom_cross_att_queries_subset_size: int = 32
     atom_cross_att_keys_subset_size: int = 128
     flatten_non_standard_residues: bool = True
@@ -330,6 +331,13 @@ class WholePdbPipeline:
         )
     )
 
+    batch_contact_constraints = features.ContactConstraints.compute_features(
+        constraints=fold_input.contact_constraints,
+        all_tokens=all_tokens,
+        all_token_atoms_layout=all_token_atoms_layout,
+        max_constraints=self._config.max_contact_constraints,
+    )
+
     # Create MSA features
     batch_msa = features.MSA.compute_features(
         all_tokens=all_tokens,
@@ -420,6 +428,7 @@ class WholePdbPipeline:
         token_features=batch_token_features,
         ref_structure=batch_ref_structure,
         predicted_structure_info=batch_predicted_structure_info,
+        contact_constraints=batch_contact_constraints,
         polymer_ligand_bond_info=polymer_ligand_bond_info,
         ligand_ligand_bond_info=ligand_ligand_bond_info,
         pseudo_beta_info=batch_pseudo_beta_info,

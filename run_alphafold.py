@@ -256,6 +256,24 @@ _NUM_DIFFUSION_SAMPLES = flags.DEFINE_integer(
     'Number of diffusion samples to generate.',
     lower_bound=1,
 )
+_CONTACT_GUIDANCE_WEIGHT = flags.DEFINE_float(
+    'contact_guidance_weight',
+    0.5,
+    'Gradient-descent step size for contact-restraint diffusion guidance.',
+    lower_bound=0.0,
+)
+_CONTACT_GUIDANCE_INTERVAL = flags.DEFINE_integer(
+    'contact_guidance_interval',
+    4,
+    'Recompute the contact gradient every N inner guidance steps.',
+    lower_bound=1,
+)
+_CONTACT_GUIDANCE_STEPS = flags.DEFINE_integer(
+    'contact_guidance_steps',
+    20,
+    'Number of contact-potential gradient steps per guidance update.',
+    lower_bound=1,
+)
 _NUM_SEEDS = flags.DEFINE_integer(
     'num_seeds',
     None,
@@ -289,6 +307,9 @@ def make_model_config(
     num_diffusion_samples: int = 5,
     num_recycles: int = 10,
     return_embeddings: bool = False,
+    contact_guidance_weight: float = 0.5,
+    contact_guidance_interval: int = 4,
+    contact_guidance_steps: int = 20,
 ) -> model.Model.Config:
   """Returns a model config with some defaults overridden."""
   config = model.Model.Config()
@@ -296,6 +317,10 @@ def make_model_config(
       flash_attention_implementation
   )
   config.heads.diffusion.eval.num_samples = num_diffusion_samples
+  contact_guidance = config.heads.diffusion.eval.contact_guidance
+  contact_guidance.guidance_weight = contact_guidance_weight
+  contact_guidance.guidance_interval = contact_guidance_interval
+  contact_guidance.num_gradient_steps = contact_guidance_steps
   config.num_recycles = num_recycles
   config.return_embeddings = return_embeddings
   return config
@@ -794,6 +819,9 @@ def main(_):
             num_diffusion_samples=_NUM_DIFFUSION_SAMPLES.value,
             num_recycles=_NUM_RECYCLES.value,
             return_embeddings=_SAVE_EMBEDDINGS.value,
+            contact_guidance_weight=_CONTACT_GUIDANCE_WEIGHT.value,
+            contact_guidance_interval=_CONTACT_GUIDANCE_INTERVAL.value,
+            contact_guidance_steps=_CONTACT_GUIDANCE_STEPS.value,
         ),
         device=devices[_GPU_DEVICE.value],
         model_dir=pathlib.Path(MODEL_DIR.value),
