@@ -642,6 +642,15 @@ PYTHONPATH=/data/jpc/code/alphafold3-contact-restraints/src \
   /data/jpc/code/.conda/envs/af3/bin/python run/run_af3.py ...
 ```
 
+If the existing AF3 installation is editable, its import hook can override
+`PYTHONPATH`. In that case, bypass site initialization and add the environment's
+site-packages directory explicitly, as reported by `setup_contact_runtime.sh`:
+
+```bash
+PYTHONPATH=/data/jpc/code/alphafold3-contact-restraints/src:/path/to/site-packages \
+  /path/to/af3/bin/python -S run/run_af3.py ...
+```
+
 ```json
 "contactConstraints": [
   {
