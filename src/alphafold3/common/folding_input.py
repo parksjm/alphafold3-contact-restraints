@@ -40,7 +40,7 @@ ContactTokenId: TypeAlias = tuple[str, int] | tuple[str, int, str]
 
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
 class ContactConstraint:
-  """Upper-bound distance restraint between two residue/atom tokens.
+  """Bounded distance restraint between two residue/atom tokens.
 
   Token identifiers contain ``(chain_id, residue_id)`` for residue-level
   restraints or ``(chain_id, residue_id, atom_name)`` for atom-level
@@ -49,8 +49,10 @@ class ContactConstraint:
 
   token1: ContactTokenId
   token2: ContactTokenId
+  min_distance: float = 0.0
   max_distance: float = 6.0
   weight: float = 1.0
+  mobile_endpoint: str = 'both'
 
   def __post_init__(self):
     for field_name in ('token1', 'token2'):
@@ -74,14 +76,36 @@ class ContactConstraint:
         raise ValueError(f'{field_name} has an invalid atom name: {token!r}.')
       object.__setattr__(self, field_name, tuple(token))
 
+    if not math.isfinite(self.min_distance) or self.min_distance < 0:
+      raise ValueError(
+          'min_distance must be a non-negative finite number, got '
+          f'{self.min_distance!r}.'
+      )
     if not math.isfinite(self.max_distance) or self.max_distance <= 0:
       raise ValueError(
           f'max_distance must be a positive finite number, got '
           f'{self.max_distance!r}.'
       )
+    if self.min_distance >= self.max_distance:
+      raise ValueError(
+          'min_distance must be smaller than max_distance, got '
+          f'{self.min_distance!r} >= {self.max_distance!r}.'
+      )
     if not math.isfinite(self.weight) or self.weight <= 0:
       raise ValueError(
           f'weight must be a positive finite number, got {self.weight!r}.'
+      )
+    if self.mobile_endpoint not in ('both', 'token1', 'token2'):
+      raise ValueError(
+          'mobile_endpoint must be "both", "token1", or "token2", got '
+          f'{self.mobile_endpoint!r}.'
+      )
+    if self.mobile_endpoint != 'both' and (
+        len(self.token1) != 3 or len(self.token2) != 3
+    ):
+      raise ValueError(
+          'Chain-rigid contact guidance requires atom-level token1 and token2 '
+          'endpoints.'
       )
 
 JSON_DIALECT: Final[str] = 'alphafold3'
@@ -1236,7 +1260,14 @@ class Input:
           )
         _validate_keys(
             raw_constraint.keys(),
-            {'token1', 'token2', 'maxDistance', 'weight'},
+            {
+                'token1',
+                'token2',
+                'minDistance',
+                'maxDistance',
+                'weight',
+                'mobileEndpoint',
+            },
         )
         if 'token1' not in raw_constraint or 'token2' not in raw_constraint:
           raise ValueError(
@@ -1246,8 +1277,10 @@ class Input:
             ContactConstraint(
                 token1=raw_constraint['token1'],
                 token2=raw_constraint['token2'],
+                min_distance=float(raw_constraint.get('minDistance', 0.0)),
                 max_distance=float(raw_constraint.get('maxDistance', 6.0)),
                 weight=float(raw_constraint.get('weight', 1.0)),
+                mobile_endpoint=raw_constraint.get('mobileEndpoint', 'both'),
             )
         )
 
@@ -1472,8 +1505,10 @@ class Input:
           {
               'token1': constraint.token1,
               'token2': constraint.token2,
+              'minDistance': constraint.min_distance,
               'maxDistance': constraint.max_distance,
               'weight': constraint.weight,
+              'mobileEndpoint': constraint.mobile_endpoint,
           }
           for constraint in self.contact_constraints
       ]

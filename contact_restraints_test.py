@@ -38,20 +38,24 @@ def test_contact_constraint_json_round_trip():
   fold_input = folding_input.Input.from_json(
       _fold_input_json([
           {
-              'token1': ['A', 1],
+              'token1': ['A', 1, 'CA'],
               'token2': ['B', 2, 'CA'],
+              'minDistance': 2.5,
               'maxDistance': 7.5,
               'weight': 1.25,
+              'mobileEndpoint': 'token2',
           }
       ])
   )
 
   assert fold_input.contact_constraints == (
       folding_input.ContactConstraint(
-          token1=('A', 1),
+          token1=('A', 1, 'CA'),
           token2=('B', 2, 'CA'),
+          min_distance=2.5,
           max_distance=7.5,
           weight=1.25,
+          mobile_endpoint='token2',
       ),
   )
   round_tripped = folding_input.Input.from_json(fold_input.to_json())
@@ -75,8 +79,11 @@ def test_contact_guidance_reduces_violation():
   constraints = features.ContactConstraints(
       token_indices=jnp.array([[0, 1]], dtype=jnp.int32),
       atom_masks=jnp.array([[[True], [True]]]),
+      min_distances=jnp.array([0.0], dtype=jnp.float32),
       max_distances=jnp.array([6.0], dtype=jnp.float32),
       weights=jnp.array([1.0], dtype=jnp.float32),
+      mobile_endpoints=jnp.array([0], dtype=jnp.int32),
+      mobile_atom_masks=jnp.zeros((1, 2, 1), dtype=bool),
       mask=jnp.array([True]),
   )
   positions = jnp.array([[[0.0, 0.0, 0.0]], [[10.0, 0.0, 0.0]]])
@@ -101,8 +108,11 @@ def test_contact_guidance_interval_matches_boltz_update_count():
   constraints = features.ContactConstraints(
       token_indices=jnp.array([[0, 1]], dtype=jnp.int32),
       atom_masks=jnp.array([[[True], [True]]]),
+      min_distances=jnp.array([0.0], dtype=jnp.float32),
       max_distances=jnp.array([1.0], dtype=jnp.float32),
       weights=jnp.array([1.0], dtype=jnp.float32),
+      mobile_endpoints=jnp.array([0], dtype=jnp.int32),
+      mobile_atom_masks=jnp.zeros((1, 2, 1), dtype=bool),
       mask=jnp.array([True]),
   )
   positions = jnp.array([[[0.0, 0.0, 0.0]], [[10.0, 0.0, 0.0]]])
@@ -141,13 +151,86 @@ def test_contact_feature_mapping_handles_residue_and_atom_endpoints():
   )
 
   mapped = features.ContactConstraints.compute_features(
-      [constraint], all_tokens, all_token_atoms, max_constraints=2
+      [constraint],
+      all_tokens,
+      all_token_atoms,
+      num_tokens=2,
+      max_constraints=2,
   )
 
   np.testing.assert_array_equal(mapped.token_indices[0], [0, 1])
   np.testing.assert_array_equal(mapped.atom_masks[0, 0], [True, True, True])
   np.testing.assert_array_equal(mapped.atom_masks[0, 1], [False, True, False])
+  np.testing.assert_array_equal(mapped.min_distances, [0.0, 0.0])
   np.testing.assert_array_equal(mapped.mask, [True, False])
+
+
+def test_rigid_mobile_endpoint_preserves_internal_distance():
+  constraints = features.ContactConstraints(
+      token_indices=jnp.array([[0, 1]], dtype=jnp.int32),
+      atom_masks=jnp.array([[[True], [True]]]),
+      min_distances=jnp.array([0.0], dtype=jnp.float32),
+      max_distances=jnp.array([0.1], dtype=jnp.float32),
+      weights=jnp.array([1.0], dtype=jnp.float32),
+      mobile_endpoints=jnp.array([2], dtype=jnp.int32),
+      mobile_atom_masks=jnp.array([[[False], [True], [True]]]),
+      mask=jnp.array([True]),
+  )
+  positions = jnp.array([
+      [[0.0, 1.0, 0.0]],
+      [[1.0, 0.0, 0.0]],
+      [[0.0, 0.0, 0.0]],
+  ])
+
+  guided = diffusion_head.apply_contact_guidance(
+      positions,
+      constraints,
+      guidance_weight=jnp.array(0.1),
+      guidance_interval=1,
+      num_gradient_steps=1,
+  )
+
+  before = diffusion_head.contact_restraint_min_distances(
+      positions, constraints
+  )
+  after = diffusion_head.contact_restraint_min_distances(guided, constraints)
+  np.testing.assert_array_less(np.asarray(after), np.asarray(before))
+  np.testing.assert_allclose(
+      np.linalg.norm(np.asarray(guided[1, 0] - guided[2, 0])),
+      np.linalg.norm(np.asarray(positions[1, 0] - positions[2, 0])),
+      atol=1e-5,
+  )
+
+
+def test_rigid_mobile_endpoint_respects_lower_bound():
+  constraints = features.ContactConstraints(
+      token_indices=jnp.array([[0, 1]], dtype=jnp.int32),
+      atom_masks=jnp.array([[[True], [True]]]),
+      min_distances=jnp.array([2.5], dtype=jnp.float32),
+      max_distances=jnp.array([3.2], dtype=jnp.float32),
+      weights=jnp.array([1.0], dtype=jnp.float32),
+      mobile_endpoints=jnp.array([2], dtype=jnp.int32),
+      mobile_atom_masks=jnp.array([[[False], [True], [True]]]),
+      mask=jnp.array([True]),
+  )
+  positions = jnp.array([
+      [[0.0, 0.0, 0.0]],
+      [[0.9, 0.0, 0.0]],
+      [[2.9, 0.0, 0.0]],
+  ])
+
+  guided = diffusion_head.apply_contact_guidance(
+      positions,
+      constraints,
+      guidance_weight=jnp.array(0.5),
+      guidance_interval=1,
+      num_gradient_steps=20,
+  )
+
+  distance = diffusion_head.contact_restraint_min_distances(
+      guided, constraints
+  )
+  np.testing.assert_array_less(np.array([2.49]), np.asarray(distance))
 
 
 def test_old_feature_batches_get_empty_contact_constraints():
@@ -162,8 +245,11 @@ def test_sampler_runs_with_contact_guidance():
   constraints = features.ContactConstraints(
       token_indices=jnp.array([[0, 1]], dtype=jnp.int32),
       atom_masks=jnp.array([[[True], [True]]]),
+      min_distances=jnp.array([0.0], dtype=jnp.float32),
       max_distances=jnp.array([6.0], dtype=jnp.float32),
       weights=jnp.array([1.0], dtype=jnp.float32),
+      mobile_endpoints=jnp.array([0], dtype=jnp.int32),
+      mobile_atom_masks=jnp.zeros((1, 2, 1), dtype=bool),
       mask=jnp.array([True]),
   )
   batch = types.SimpleNamespace(
@@ -197,6 +283,11 @@ def test_sampler_runs_with_contact_guidance():
 
   assert result['atom_positions'].shape == (1, 2, 1, 3)
   assert np.isfinite(np.asarray(result['atom_positions'])).all()
+  assert result['contact_restraint_distances_after_step'].shape == (4, 1, 1)
+  np.testing.assert_allclose(
+      np.asarray(result['contact_guidance_weights'])[:, 0],
+      [0.5, 0.25, 0.25, 0.5],
+  )
 
 
 def test_restraint_diagnostics_are_written_to_confidence_json():
@@ -208,11 +299,17 @@ def test_restraint_diagnostics_are_written_to_confidence_json():
       atom_chain_ids=['A'],
       contact_probs=np.ones((1, 1)),
       contact_restraint_distances=[5.5],
+      contact_restraint_min_thresholds=[2.5],
       contact_restraint_thresholds=[6.0],
       contact_restraint_satisfied=[True],
+      contact_restraint_distances_before_guidance=[[9.0]],
+      contact_restraint_distances_after_guidance=[[5.5]],
+      contact_restraint_distances_after_step=[[5.7]],
+      contact_guidance_weights=[0.5],
   )
   encoded = json.loads(confidence.to_json())
   assert encoded['contact_restraint_distances'] == [5.5]
+  assert encoded['contact_restraint_min_thresholds'] == [2.5]
   assert encoded['contact_restraint_thresholds'] == [6.0]
   assert encoded['contact_restraint_satisfied'] == [True]
 

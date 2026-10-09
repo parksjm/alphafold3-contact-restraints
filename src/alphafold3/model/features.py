@@ -1017,8 +1017,11 @@ class ContactConstraints:
 
   token_indices: xnp_ndarray
   atom_masks: xnp_ndarray
+  min_distances: xnp_ndarray
   max_distances: xnp_ndarray
   weights: xnp_ndarray
+  mobile_endpoints: xnp_ndarray
+  mobile_atom_masks: xnp_ndarray
   mask: xnp_ndarray
 
   @classmethod
@@ -1027,6 +1030,7 @@ class ContactConstraints:
       constraints: Sequence[folding_input.ContactConstraint] | None,
       all_tokens: atom_layout.AtomLayout,
       all_token_atoms_layout: atom_layout.AtomLayout,
+      num_tokens: int,
       max_constraints: int,
   ) -> Self:
     """Maps chain/residue/atom identifiers to dense diffusion atom slots."""
@@ -1042,8 +1046,13 @@ class ContactConstraints:
     atom_masks = np.zeros(
         (max_constraints, 2, max_atoms_per_token), dtype=bool
     )
+    min_distances = np.zeros((max_constraints,), dtype=np.float32)
     max_distances = np.zeros((max_constraints,), dtype=np.float32)
     weights = np.zeros((max_constraints,), dtype=np.float32)
+    mobile_endpoints = np.zeros((max_constraints,), dtype=np.int32)
+    mobile_atom_masks = np.zeros(
+        (max_constraints, num_tokens, max_atoms_per_token), dtype=bool
+    )
     mask = np.zeros((max_constraints,), dtype=bool)
 
     def resolve_token(
@@ -1087,15 +1096,30 @@ class ContactConstraints:
         token_index, atom_mask = resolve_token(endpoint)
         token_indices[idx, endpoint_idx] = token_index
         atom_masks[idx, endpoint_idx] = atom_mask
+      min_distances[idx] = constraint.min_distance
       max_distances[idx] = constraint.max_distance
       weights[idx] = constraint.weight
+      if constraint.mobile_endpoint != 'both':
+        endpoint_index = 0 if constraint.mobile_endpoint == 'token1' else 1
+        mobile_endpoints[idx] = endpoint_index + 1
+        mobile_chain_id = (constraint.token1, constraint.token2)[
+            endpoint_index
+        ][0]
+        mobile_chain_mask = (
+            (all_token_atoms_layout.chain_id == mobile_chain_id)
+            & all_token_atoms_layout.atom_name.astype(bool)
+        )
+        mobile_atom_masks[idx, : mobile_chain_mask.shape[0]] = mobile_chain_mask
       mask[idx] = True
 
     return cls(
         token_indices=token_indices,
         atom_masks=atom_masks,
+        min_distances=min_distances,
         max_distances=max_distances,
         weights=weights,
+        mobile_endpoints=mobile_endpoints,
+        mobile_atom_masks=mobile_atom_masks,
         mask=mask,
     )
 
@@ -1108,15 +1132,38 @@ class ContactConstraints:
       return cls(
           token_indices=np.zeros((0, 2), dtype=np.int32),
           atom_masks=np.zeros((0, 2, max_atoms_per_token), dtype=bool),
+          min_distances=np.zeros((0,), dtype=np.float32),
           max_distances=np.zeros((0,), dtype=np.float32),
           weights=np.zeros((0,), dtype=np.float32),
+          mobile_endpoints=np.zeros((0,), dtype=np.int32),
+          mobile_atom_masks=np.zeros(
+              (0,) + batch['pred_dense_atom_mask'].shape, dtype=bool
+          ),
           mask=np.zeros((0,), dtype=bool),
       )
     return cls(
         token_indices=batch['contact_constraint_token_indices'],
         atom_masks=batch['contact_constraint_atom_masks'],
+        min_distances=batch.get(
+            'contact_constraint_min_distances',
+            jnp.zeros_like(batch['contact_constraint_max_distances']),
+        ),
         max_distances=batch['contact_constraint_max_distances'],
         weights=batch['contact_constraint_weights'],
+        mobile_endpoints=batch.get(
+            'contact_constraint_mobile_endpoints',
+            jnp.zeros_like(
+                batch['contact_constraint_max_distances'], dtype=jnp.int32
+            ),
+        ),
+        mobile_atom_masks=batch.get(
+            'contact_constraint_mobile_atom_masks',
+            jnp.zeros(
+                (batch['contact_constraint_max_distances'].shape[0],)
+                + batch['pred_dense_atom_mask'].shape,
+                dtype=bool,
+            ),
+        ),
         mask=batch['contact_constraint_mask'],
     )
 
@@ -1124,8 +1171,11 @@ class ContactConstraints:
     return {
         'contact_constraint_token_indices': self.token_indices,
         'contact_constraint_atom_masks': self.atom_masks,
+        'contact_constraint_min_distances': self.min_distances,
         'contact_constraint_max_distances': self.max_distances,
         'contact_constraint_weights': self.weights,
+        'contact_constraint_mobile_endpoints': self.mobile_endpoints,
+        'contact_constraint_mobile_atom_masks': self.mobile_atom_masks,
         'contact_constraint_mask': self.mask,
     }
 

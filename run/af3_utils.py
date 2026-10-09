@@ -144,9 +144,18 @@ def get_af3_parser() -> FileArgumentParser:
         help="Gradient-descent step size for contact-restraint guidance."
     )
     parser.add_argument(
+        "--contact_guidance_final_weight_scale",
+        type=float,
+        default=1.0,
+        help=(
+            "Fraction of contact guidance retained during the final quarter "
+            "of diffusion. Defaults to 1.0."
+        ),
+    )
+    parser.add_argument(
         "--contact_guidance_interval",
         type=int,
-        default=4,
+        default=1,
         help="Recompute the contact gradient every N inner guidance steps."
     )
     parser.add_argument(

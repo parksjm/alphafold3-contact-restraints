@@ -662,7 +662,9 @@ PYTHONPATH=/data/jpc/code/alphafold3-contact-restraints/src:/path/to/site-packag
   {
     "token1": ["A", 82, "NZ"],
     "token2": ["L", 1, "O1"],
-    "maxDistance": 4.0
+    "minDistance": 2.5,
+    "maxDistance": 4.0,
+    "mobileEndpoint": "token2"
   }
 ]
 ```
@@ -673,21 +675,35 @@ restraint uses the minimum distance between any modeled atom in the two
 residues; an atom-level endpoint restricts that side to the named atom.
 Ligands and flattened non-standard residues that occupy multiple tokens must
 use an atom-level endpoint.
-`maxDistance` is an upper bound in Angstroms and defaults to 6.0. `weight` is a
-positive multiplier on that restraint's potential and defaults to 1.0.
+`minDistance` and `maxDistance` are lower and upper bounds in Angstroms and
+default to 0.0 and 6.0, respectively. `weight` is a positive multiplier on
+that restraint's potential and defaults to 1.0. `mobileEndpoint` can be
+`"both"` (the default), `"token1"`, or `"token2"`. An explicitly mobile
+endpoint requires atom-level identifiers and causes the whole endpoint chain
+to move as a rigid body during guidance.
 
-The sampler applies Boltz's flat-bottom linear potential to its denoised
-coordinate estimate. The default schedule follows Boltz's forced-contact
-guidance: 20 inner optimization steps at every diffusion step, recomputing the
-contact gradient every 4 inner steps, with global step size 0.5 early in
-sampling, 0.25 in the middle, and zero in the final quarter. The global
-settings can be changed with
+For `mobileEndpoint: "both"`, the sampler applies Boltz's atom-coordinate
+gradient update to its denoised coordinate estimate. Explicitly mobile chains
+use a fork-specific, capped rigid-body translation/rotation update; this is
+not part of Boltz. Exact axis-angle rotations preserve internal ligand
+geometry, while a nonzero `minDistance` prevents other restraints on the same
+chain from collapsing an already satisfied contact.
+
+The default schedule uses 20 inner optimization steps at every diffusion step,
+recomputing the contact update at every inner step. The global step size is
+0.5 early in sampling, 0.25 in the middle, and 0.5 in the final quarter. This
+is intentionally stronger than Boltz's forced-contact schedule: fixed-seed
+AF3 tests showed that interval-4 updates and reduced terminal guidance did not
+reliably preserve the requested contacts. The settings can be changed with
 `--contact_guidance_weight`,
+`--contact_guidance_final_weight_scale`,
 `--contact_guidance_interval`, and `--contact_guidance_steps`.
 
 Per-sample achieved distances, thresholds, and satisfaction flags are written
 to `confidences.json` as `contact_restraint_distances`,
-`contact_restraint_thresholds`, and `contact_restraint_satisfied`.
+`contact_restraint_min_thresholds`, `contact_restraint_thresholds`, and
+`contact_restraint_satisfied`. Per-step distances before guidance, after
+guidance, and after the Euler update are also recorded for validation.
 
 This is guidance of a model that was not trained with contact-conditioning
 features. Strong or mutually inconsistent restraints can distort local

@@ -262,9 +262,15 @@ _CONTACT_GUIDANCE_WEIGHT = flags.DEFINE_float(
     'Gradient-descent step size for contact-restraint diffusion guidance.',
     lower_bound=0.0,
 )
+_CONTACT_GUIDANCE_FINAL_WEIGHT_SCALE = flags.DEFINE_float(
+    'contact_guidance_final_weight_scale',
+    1.0,
+    'Fraction of contact guidance retained in the final diffusion quarter.',
+    lower_bound=0.0,
+)
 _CONTACT_GUIDANCE_INTERVAL = flags.DEFINE_integer(
     'contact_guidance_interval',
-    4,
+    1,
     'Recompute the contact gradient every N inner guidance steps.',
     lower_bound=1,
 )
@@ -308,7 +314,8 @@ def make_model_config(
     num_recycles: int = 10,
     return_embeddings: bool = False,
     contact_guidance_weight: float = 0.5,
-    contact_guidance_interval: int = 4,
+    contact_guidance_final_weight_scale: float = 1.0,
+    contact_guidance_interval: int = 1,
     contact_guidance_steps: int = 20,
 ) -> model.Model.Config:
   """Returns a model config with some defaults overridden."""
@@ -319,6 +326,7 @@ def make_model_config(
   config.heads.diffusion.eval.num_samples = num_diffusion_samples
   contact_guidance = config.heads.diffusion.eval.contact_guidance
   contact_guidance.guidance_weight = contact_guidance_weight
+  contact_guidance.final_weight_scale = contact_guidance_final_weight_scale
   contact_guidance.guidance_interval = contact_guidance_interval
   contact_guidance.num_gradient_steps = contact_guidance_steps
   config.num_recycles = num_recycles
@@ -820,6 +828,9 @@ def main(_):
             num_recycles=_NUM_RECYCLES.value,
             return_embeddings=_SAVE_EMBEDDINGS.value,
             contact_guidance_weight=_CONTACT_GUIDANCE_WEIGHT.value,
+            contact_guidance_final_weight_scale=(
+                _CONTACT_GUIDANCE_FINAL_WEIGHT_SCALE.value
+            ),
             contact_guidance_interval=_CONTACT_GUIDANCE_INTERVAL.value,
             contact_guidance_steps=_CONTACT_GUIDANCE_STEPS.value,
         ),

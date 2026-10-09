@@ -514,6 +514,23 @@ class Model(hk.Module):
       contact_restraint_thresholds = np.asarray(
           batch.contact_constraints.max_distances
       )[contact_constraint_mask]
+      contact_restraint_min_thresholds = np.asarray(
+          batch.contact_constraints.min_distances
+      )[contact_constraint_mask]
+      diffusion_samples = result['diffusion_samples']
+      contact_restraint_trace = {
+          name: np.asarray(diffusion_samples[name])[
+              :, idx, contact_constraint_mask
+          ]
+          for name in (
+              'contact_restraint_distances_before_guidance',
+              'contact_restraint_distances_after_guidance',
+              'contact_restraint_distances_after_step',
+          )
+      }
+      contact_guidance_weights = np.asarray(
+          diffusion_samples['contact_guidance_weights']
+      )[:, idx]
       ranking_score = confidences.get_ranking_score(
           ptm=ptm[idx],
           iptm=iptm[idx],
@@ -527,10 +544,22 @@ class Model(hk.Module):
               'full_pae': result['full_pae'][idx, :num_tokens, :num_tokens],
               'contact_probs': contact_probs[:num_tokens, :num_tokens],
               'contact_restraint_distances': contact_restraint_distances,
+              'contact_restraint_min_thresholds': (
+                  contact_restraint_min_thresholds
+              ),
               'contact_restraint_thresholds': contact_restraint_thresholds,
               'contact_restraint_satisfied': (
-                  contact_restraint_distances <= contact_restraint_thresholds
+                  (
+                      contact_restraint_distances
+                      >= contact_restraint_min_thresholds
+                  )
+                  & (
+                      contact_restraint_distances
+                      <= contact_restraint_thresholds
+                  )
               ),
+              **contact_restraint_trace,
+              'contact_guidance_weights': contact_guidance_weights,
           },
           metadata={
               'predicted_distance_error': predicted_distance_errors[idx],

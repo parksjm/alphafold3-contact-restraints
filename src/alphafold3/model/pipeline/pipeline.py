@@ -335,6 +335,7 @@ class WholePdbPipeline:
         constraints=fold_input.contact_constraints,
         all_tokens=all_tokens,
         all_token_atoms_layout=all_token_atoms_layout,
+        num_tokens=padding_shapes.num_tokens,
         max_constraints=self._config.max_contact_constraints,
     )
 

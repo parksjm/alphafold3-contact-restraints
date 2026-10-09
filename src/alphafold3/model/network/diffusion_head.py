@@ -94,12 +94,15 @@ class ContactGuidanceConfig(base_config.BaseConfig):
   """Inference-time flat-bottom contact-restraint guidance."""
 
   guidance_weight: float = 0.5
-  guidance_interval: int = 4
+  final_weight_scale: float = 1.0
+  guidance_interval: int = 1
   num_gradient_steps: int = 20
 
   def __post_init__(self):
     if self.guidance_weight < 0:
       raise ValueError('guidance_weight must be non-negative.')
+    if self.final_weight_scale < 0:
+      raise ValueError('final_weight_scale must be non-negative.')
     if self.guidance_interval < 1:
       raise ValueError('guidance_interval must be at least 1.')
     if self.num_gradient_steps < 1:
@@ -333,11 +336,126 @@ def contact_restraint_energy(
     positions: jnp.ndarray,
     constraints,
 ) -> jnp.ndarray:
-  """Computes Boltz-style flat-bottom linear upper-bound restraint energy."""
+  """Computes a flat-bottom linear bounded-distance restraint energy."""
   min_distances = contact_restraint_min_distances(positions, constraints)
-  violations = jnp.maximum(min_distances - constraints.max_distances, 0.0)
+  violations = jnp.maximum(
+      constraints.min_distances - min_distances, 0.0
+  ) + jnp.maximum(min_distances - constraints.max_distances, 0.0)
   active = constraints.mask.astype(positions.dtype)
   return jnp.sum(active * constraints.weights * violations)
+
+
+def local_contact_restraint_energy(
+    positions: jnp.ndarray,
+    constraints,
+) -> jnp.ndarray:
+  """Returns energy for restraints that move endpoint atoms independently."""
+  min_distances = contact_restraint_min_distances(positions, constraints)
+  violations = jnp.maximum(
+      constraints.min_distances - min_distances, 0.0
+  ) + jnp.maximum(min_distances - constraints.max_distances, 0.0)
+  active = (
+      constraints.mask & (constraints.mobile_endpoints == 0)
+  ).astype(positions.dtype)
+  return jnp.sum(active * constraints.weights * violations)
+
+
+def _clip_vector_norm(vector: jnp.ndarray, max_norm: float) -> jnp.ndarray:
+  """Returns a vector with its Euclidean norm capped at ``max_norm``."""
+  norm = jnp.linalg.norm(vector)
+  scale = jnp.minimum(1.0, max_norm / jnp.maximum(norm, 1e-8))
+  return vector * scale
+
+
+def _rotate_about_center(
+    positions: jnp.ndarray,
+    center: jnp.ndarray,
+    rotation_vector: jnp.ndarray,
+) -> jnp.ndarray:
+  """Applies an exact axis-angle rotation around ``center``."""
+  angle = jnp.linalg.norm(rotation_vector)
+  axis = rotation_vector / jnp.maximum(angle, 1e-8)
+  centered = positions - center
+  rotated = (
+      centered * jnp.cos(angle)
+      + jnp.cross(axis, centered) * jnp.sin(angle)
+      + axis
+      * jnp.sum(centered * axis, axis=-1, keepdims=True)
+      * (1.0 - jnp.cos(angle))
+  )
+  return rotated + center
+
+
+def apply_rigid_chain_contact_guidance(
+    positions: jnp.ndarray,
+    constraints,
+    guidance_weight: jnp.ndarray,
+) -> jnp.ndarray:
+  """Applies capped exact rigid transforms for explicitly mobile chains."""
+
+  def apply_one_constraint(
+      constraint_index: int, current_positions: jnp.ndarray
+  ) -> jnp.ndarray:
+    token_indices = constraints.token_indices[constraint_index]
+    endpoint1 = current_positions[token_indices[0]]
+    endpoint2 = current_positions[token_indices[1]]
+    mask1 = constraints.atom_masks[constraint_index, 0]
+    mask2 = constraints.atom_masks[constraint_index, 1]
+    coord1 = jnp.sum(endpoint1 * mask1[..., None], axis=0)
+    coord2 = jnp.sum(endpoint2 * mask2[..., None], axis=0)
+    displacement = coord1 - coord2
+    distance = jnp.linalg.norm(displacement)
+    below_minimum = distance < constraints.min_distances[constraint_index]
+    above_maximum = distance > constraints.max_distances[constraint_index]
+    active = (
+        constraints.mask[constraint_index]
+        & (constraints.mobile_endpoints[constraint_index] > 0)
+        & (below_minimum | above_maximum)
+    )
+    gradient_sign = jnp.where(
+        above_maximum, 1.0, jnp.where(below_minimum, -1.0, 0.0)
+    )
+    gradient1 = (
+        gradient_sign
+        * constraints.weights[constraint_index]
+        * displacement
+        / jnp.maximum(distance, 1e-8)
+    )
+    mobile_endpoint = constraints.mobile_endpoints[constraint_index]
+    mobile_gradient = jnp.where(mobile_endpoint == 1, gradient1, -gradient1)
+    descent = -mobile_gradient
+
+    group_mask = constraints.mobile_atom_masks[constraint_index]
+    group_mask_float = group_mask.astype(current_positions.dtype)
+    group_size = jnp.maximum(jnp.sum(group_mask_float), 1.0)
+    group_center = (
+        jnp.sum(current_positions * group_mask_float[..., None], axis=(0, 1))
+        / group_size
+    )
+    mobile_coord = jnp.where(mobile_endpoint == 1, coord1, coord2)
+    lever_arm = mobile_coord - group_center
+    translation = _clip_vector_norm(
+        0.5 * guidance_weight * descent, max_norm=0.25
+    )
+    angular_descent = (
+        0.5
+        * guidance_weight
+        * jnp.cross(lever_arm, descent)
+        / jnp.maximum(jnp.sum(jnp.square(lever_arm)), 1.0)
+    )
+    angular_descent = _clip_vector_norm(
+        angular_descent, max_norm=jnp.deg2rad(2.0)
+    )
+    transformed = _rotate_about_center(
+        current_positions, group_center, angular_descent
+    ) + translation
+    return jnp.where(
+        (active & group_mask)[..., None], transformed, current_positions
+    )
+
+  return jax.lax.fori_loop(
+      0, constraints.mask.shape[0], apply_one_constraint, positions
+  )
 
 
 def apply_contact_guidance(
@@ -357,15 +475,37 @@ def apply_contact_guidance(
     # they are no-ops when contact is the only active potential.
     return jax.lax.cond(
         step_index % guidance_interval == 0,
-        lambda x: x
-        - guidance_weight
-        * jax.grad(contact_restraint_energy)(x, constraints),
+        lambda x: apply_rigid_chain_contact_guidance(
+            x
+            - guidance_weight
+            * jax.grad(local_contact_restraint_energy)(x, constraints),
+            constraints,
+            guidance_weight,
+        ),
         lambda x: x,
         guided_positions,
     )
 
   return jax.lax.fori_loop(
       0, num_gradient_steps, guidance_step, positions
+  )
+
+
+def contact_guidance_weight(
+    step_index: jnp.ndarray,
+    num_steps: int,
+    config: ContactGuidanceConfig,
+) -> jnp.ndarray:
+  """Returns the contact-guidance weight for one diffusion step."""
+  steering_t = 1.0 - step_index / num_steps
+  return jnp.where(
+      steering_t > 0.75,
+      config.guidance_weight,
+      jnp.where(
+          steering_t > 0.25,
+          0.5 * config.guidance_weight,
+          config.final_weight_scale * config.guidance_weight,
+      ),
   )
 
 
@@ -415,19 +555,14 @@ def sample(
     positions_denoised = denoising_step(positions_noisy, t_hat)
 
     guidance_config = config.contact_guidance
-    steering_t = 1.0 - step_index / config.steps
-    scheduled_weight = jnp.where(
-        steering_t > 0.75,
-        guidance_config.guidance_weight,
-        jnp.where(
-            steering_t > 0.25,
-            0.5 * guidance_config.guidance_weight,
-            0.0,
-        ),
+    distances_before_guidance = contact_restraint_min_distances(
+        positions_denoised, batch.contact_constraints
+    )
+    scheduled_weight = contact_guidance_weight(
+        step_index, config.steps, guidance_config
     )
     apply_guidance = (
-        (step_index < config.steps - 1)
-        & (scheduled_weight > 0)
+        (scheduled_weight > 0)
         & jnp.any(batch.contact_constraints.mask)
     )
     positions_denoised = jax.lax.cond(
@@ -442,12 +577,24 @@ def sample(
         lambda x: x,
         positions_denoised,
     )
+    distances_after_guidance = contact_restraint_min_distances(
+        positions_denoised, batch.contact_constraints
+    )
     grad = (positions_noisy - positions_denoised) / t_hat
 
     d_t = noise_level - t_hat
     positions_out = positions_noisy + config.step_scale * d_t * grad
+    distances_after_step = contact_restraint_min_distances(
+        positions_out, batch.contact_constraints
+    )
 
-    return (key, positions_out, noise_level), positions_out
+    diagnostics = (
+        distances_before_guidance,
+        distances_after_guidance,
+        distances_after_step,
+        scheduled_weight,
+    )
+    return (key, positions_out, noise_level), diagnostics
 
   num_samples = config.num_samples
 
@@ -467,9 +614,26 @@ def sample(
       apply_denoising_step, in_axes=(0, None), split_rng=(not hk.running_init())
   )
   scan_inputs = (noise_levels[1:], jnp.arange(config.steps))
-  result, _ = hk.scan(apply_denoising_step, init, scan_inputs, unroll=4)
+  result, diagnostics = hk.scan(
+      apply_denoising_step, init, scan_inputs, unroll=4
+  )
   _, positions_out, _ = result
+  (
+      distances_before_guidance,
+      distances_after_guidance,
+      distances_after_step,
+      guidance_weights,
+  ) = diagnostics
 
   final_dense_atom_mask = jnp.tile(mask[None], (num_samples, 1, 1))
 
-  return {'atom_positions': positions_out, 'mask': final_dense_atom_mask}
+  return {
+      'atom_positions': positions_out,
+      'mask': final_dense_atom_mask,
+      'contact_restraint_distances_before_guidance': (
+          distances_before_guidance
+      ),
+      'contact_restraint_distances_after_guidance': distances_after_guidance,
+      'contact_restraint_distances_after_step': distances_after_step,
+      'contact_guidance_weights': guidance_weights,
+  }

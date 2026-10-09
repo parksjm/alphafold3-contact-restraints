@@ -147,7 +147,8 @@ def make_model_config(
     num_recycles: int = 10,
     return_embeddings: bool = False,
     contact_guidance_weight: float = 0.5,
-    contact_guidance_interval: int = 4,
+    contact_guidance_final_weight_scale: float = 1.0,
+    contact_guidance_interval: int = 1,
     contact_guidance_steps: int = 20,
 ) -> model.Model.Config:
     """Returns a model config with some defaults overridden."""
@@ -158,6 +159,7 @@ def make_model_config(
     config.heads.diffusion.eval.num_samples = num_diffusion_samples
     contact_guidance = config.heads.diffusion.eval.contact_guidance
     contact_guidance.guidance_weight = contact_guidance_weight
+    contact_guidance.final_weight_scale = contact_guidance_final_weight_scale
     contact_guidance.guidance_interval = contact_guidance_interval
     contact_guidance.num_gradient_steps = contact_guidance_steps
     config.num_recycles = num_recycles
@@ -649,6 +651,9 @@ def main(args_dict: Dict[str, Any]) -> None:
                 num_recycles=args_dict["num_recycles"],
                 return_embeddings=args_dict["save_embeddings"],
                 contact_guidance_weight=args_dict["contact_guidance_weight"],
+                contact_guidance_final_weight_scale=args_dict[
+                    "contact_guidance_final_weight_scale"
+                ],
                 contact_guidance_interval=args_dict["contact_guidance_interval"],
                 contact_guidance_steps=args_dict["contact_guidance_steps"],
             ),

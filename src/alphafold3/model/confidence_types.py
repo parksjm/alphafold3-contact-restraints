@@ -45,12 +45,39 @@ class StructureConfidenceFullEncoder(json.JSONEncoder):
     contact_restraint_thresholds = np.round(
         np.asarray(o.contact_restraint_thresholds, dtype=np.float64), 2
     ).astype(float)
+    contact_restraint_min_thresholds = np.round(
+        np.asarray(o.contact_restraint_min_thresholds, dtype=np.float64), 2
+    ).astype(float)
+    contact_restraint_distances_before_guidance = np.round(
+        np.asarray(
+            o.contact_restraint_distances_before_guidance, dtype=np.float64
+        ),
+        2,
+    ).astype(float)
+    contact_restraint_distances_after_guidance = np.round(
+        np.asarray(
+            o.contact_restraint_distances_after_guidance, dtype=np.float64
+        ),
+        2,
+    ).astype(float)
+    contact_restraint_distances_after_step = np.round(
+        np.asarray(o.contact_restraint_distances_after_step, dtype=np.float64),
+        2,
+    ).astype(float)
+    contact_guidance_weights = np.round(
+        np.asarray(o.contact_guidance_weights, dtype=np.float64), 4
+    ).astype(float)
     return """\
 {
   "atom_chain_ids": %s,
   "atom_plddts": %s,
+  "contact_guidance_weights": %s,
   "contact_probs": %s,
   "contact_restraint_distances": %s,
+  "contact_restraint_distances_after_guidance": %s,
+  "contact_restraint_distances_after_step": %s,
+  "contact_restraint_distances_before_guidance": %s,
+  "contact_restraint_min_thresholds": %s,
   "contact_restraint_satisfied": %s,
   "contact_restraint_thresholds": %s,
   "pae": %s,
@@ -59,8 +86,13 @@ class StructureConfidenceFullEncoder(json.JSONEncoder):
 }""" % (
         super().encode(o.atom_chain_ids),
         super().encode(list(atom_plddts)).replace('NaN', 'null'),
+        super().encode(contact_guidance_weights.tolist()),
         super().encode([list(x) for x in contact_probs]).replace('NaN', 'null'),
         super().encode(list(contact_restraint_distances)),
+        super().encode(contact_restraint_distances_after_guidance.tolist()),
+        super().encode(contact_restraint_distances_after_step.tolist()),
+        super().encode(contact_restraint_distances_before_guidance.tolist()),
+        super().encode(list(contact_restraint_min_thresholds)),
         super().encode(o.contact_restraint_satisfied),
         super().encode(list(contact_restraint_thresholds)),
         super().encode([list(x) for x in pae]).replace('NaN', 'null'),
@@ -280,7 +312,22 @@ class StructureConfidenceFull:
   contact_restraint_thresholds: list[float] = dataclasses.field(
       default_factory=list
   )
+  contact_restraint_min_thresholds: list[float] = dataclasses.field(
+      default_factory=list
+  )
   contact_restraint_satisfied: list[bool] = dataclasses.field(
+      default_factory=list
+  )
+  contact_restraint_distances_before_guidance: list[list[float]] = (
+      dataclasses.field(default_factory=list)
+  )
+  contact_restraint_distances_after_guidance: list[list[float]] = (
+      dataclasses.field(default_factory=list)
+  )
+  contact_restraint_distances_after_step: list[list[float]] = dataclasses.field(
+      default_factory=list
+  )
+  contact_guidance_weights: list[float] = dataclasses.field(
       default_factory=list
   )
 
@@ -306,9 +353,32 @@ class StructureConfidenceFull:
     contact_restraint_thresholds = np.asarray(
         inference_result.numerical_data.get('contact_restraint_thresholds', [])
     ).tolist()
+    contact_restraint_min_thresholds = np.asarray(
+        inference_result.numerical_data.get(
+            'contact_restraint_min_thresholds', []
+        )
+    ).tolist()
     contact_restraint_satisfied = np.asarray(
         inference_result.numerical_data.get('contact_restraint_satisfied', []),
         dtype=bool,
+    ).tolist()
+    contact_restraint_distances_before_guidance = np.asarray(
+        inference_result.numerical_data.get(
+            'contact_restraint_distances_before_guidance', []
+        )
+    ).tolist()
+    contact_restraint_distances_after_guidance = np.asarray(
+        inference_result.numerical_data.get(
+            'contact_restraint_distances_after_guidance', []
+        )
+    ).tolist()
+    contact_restraint_distances_after_step = np.asarray(
+        inference_result.numerical_data.get(
+            'contact_restraint_distances_after_step', []
+        )
+    ).tolist()
+    contact_guidance_weights = np.asarray(
+        inference_result.numerical_data.get('contact_guidance_weights', [])
     ).tolist()
 
     struc = inference_result.predicted_structure
@@ -330,7 +400,18 @@ class StructureConfidenceFull:
         contact_probs=contact_probs,
         contact_restraint_distances=contact_restraint_distances,
         contact_restraint_thresholds=contact_restraint_thresholds,
+        contact_restraint_min_thresholds=contact_restraint_min_thresholds,
         contact_restraint_satisfied=contact_restraint_satisfied,
+        contact_restraint_distances_before_guidance=(
+            contact_restraint_distances_before_guidance
+        ),
+        contact_restraint_distances_after_guidance=(
+            contact_restraint_distances_after_guidance
+        ),
+        contact_restraint_distances_after_step=(
+            contact_restraint_distances_after_step
+        ),
+        contact_guidance_weights=contact_guidance_weights,
     )
 
   @classmethod
