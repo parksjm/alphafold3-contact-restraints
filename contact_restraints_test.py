@@ -97,6 +97,32 @@ def test_contact_guidance_reduces_violation():
   np.testing.assert_array_less(np.asarray(after), np.array([6.01]))
 
 
+def test_contact_guidance_interval_matches_boltz_update_count():
+  constraints = features.ContactConstraints(
+      token_indices=jnp.array([[0, 1]], dtype=jnp.int32),
+      atom_masks=jnp.array([[[True], [True]]]),
+      max_distances=jnp.array([1.0], dtype=jnp.float32),
+      weights=jnp.array([1.0], dtype=jnp.float32),
+      mask=jnp.array([True]),
+  )
+  positions = jnp.array([[[0.0, 0.0, 0.0]], [[10.0, 0.0, 0.0]]])
+
+  guided = diffusion_head.apply_contact_guidance(
+      positions,
+      constraints,
+      guidance_weight=jnp.array(0.1),
+      guidance_interval=4,
+      num_gradient_steps=20,
+  )
+
+  # Updates occur at inner iterations 0, 4, 8, 12, and 16. Each update moves
+  # both endpoint atoms by 0.1 A, reducing their separation by 0.2 A.
+  distance = diffusion_head.contact_restraint_min_distances(
+      guided, constraints
+  )
+  np.testing.assert_allclose(np.asarray(distance), [9.0], atol=1e-4)
+
+
 def test_contact_feature_mapping_handles_residue_and_atom_endpoints():
   all_tokens = atom_layout.AtomLayout(
       atom_name=np.array(['CA', 'CA'], dtype=object),

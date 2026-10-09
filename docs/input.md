@@ -631,6 +631,17 @@ This fork supports up to 64 noncovalent contact restraints per input. They are
 implemented as inference-time diffusion guidance and do not use the covalent
 bond features or change the AlphaFold model parameters.
 
+For a source clone used with an existing binary AF3 installation, run
+`./setup_contact_runtime.sh` once. It creates ignored symlinks to the installed
+AF3 C++ extension and generated CCD resources without modifying that
+installation. Then run this fork with its source directory first on the module
+path, for example:
+
+```bash
+PYTHONPATH=/data/jpc/code/alphafold3-contact-restraints/src \
+  /data/jpc/code/.conda/envs/af3/bin/python run/run_af3.py ...
+```
+
 ```json
 "contactConstraints": [
   {

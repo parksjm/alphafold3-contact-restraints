@@ -351,6 +351,10 @@ def apply_contact_guidance(
   """Runs gradient descent on the contact potential for an x0 prediction."""
 
   def guidance_step(step_index, guided_positions):
+    # This intentionally matches Boltz: its contact potential has interval 4,
+    # so a 20-iteration inner loop updates at 0, 4, 8, 12, and 16. The other
+    # iterations allow potentials with different intervals to share that loop;
+    # they are no-ops when contact is the only active potential.
     return jax.lax.cond(
         step_index % guidance_interval == 0,
         lambda x: x
