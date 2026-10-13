@@ -20,6 +20,7 @@ from absl import logging
 from alphafold3 import structure
 from alphafold3.common import base_config
 from alphafold3.model import confidences
+from alphafold3.model import contact_restraints
 from alphafold3.model import feat_batch
 from alphafold3.model import features
 from alphafold3.model import model_config
@@ -59,7 +60,7 @@ class InferenceResult:
 
   predicted_structure: structure.Structure = dataclasses.field()
   numerical_data: _ScalarNumberOrArray = dataclasses.field(default_factory=dict)
-  metadata: _ScalarNumberOrArray = dataclasses.field(default_factory=dict)
+  metadata: Mapping[str, Any] = dataclasses.field(default_factory=dict)
   debug_outputs: Mapping[str, Any] = dataclasses.field(default_factory=dict)
   model_id: bytes = b''
 
@@ -342,6 +343,9 @@ class Model(hk.Module):
     output = {
         'diffusion_samples': samples,
         'contact_restraint_distances': contact_restraint_distances,
+        'contact_guidance_weight': jnp.asarray(
+            self.config.heads.diffusion.eval.contact_guidance.guidance_weight
+        ),
         'distogram': distogram,
         **confidence_output,
     }
@@ -374,6 +378,8 @@ class Model(hk.Module):
       dictionary of raw model result from the forward pass (for debugging).
     """
     del target_name
+    contact_restraints.validate_inference_result(result, batch)
+    host_batch = batch
     batch = feat_batch.Batch.from_data_dict(batch)
 
     # Retrieve structure and construct a predicted structure.
@@ -562,6 +568,9 @@ class Model(hk.Module):
               'contact_guidance_weights': contact_guidance_weights,
           },
           metadata={
+              'contact_restraint_provenance': contact_restraints.restraint_provenance(
+                  host_batch, idx, result
+              ),
               'predicted_distance_error': predicted_distance_errors[idx],
               'ranking_score': ranking_score,
               'fraction_disordered': fraction_disordered[idx],

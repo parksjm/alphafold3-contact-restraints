@@ -44,6 +44,7 @@ from alphafold3.data import featurisation
 from alphafold3.data import pipeline
 from alphafold3.jax.attention import attention
 from alphafold3.model import features
+from alphafold3.model import contact_restraints
 from alphafold3.model import model
 from alphafold3.model import params
 from alphafold3.model import post_processing
@@ -329,6 +330,7 @@ def make_model_config(
   contact_guidance.final_weight_scale = contact_guidance_final_weight_scale
   contact_guidance.guidance_interval = contact_guidance_interval
   contact_guidance.num_gradient_steps = contact_guidance_steps
+  contact_guidance.__post_init__()
   config.num_recycles = num_recycles
   config.return_embeddings = return_embeddings
   return config
@@ -370,6 +372,9 @@ class ModelRunner:
       self, featurised_example: features.BatchDict, rng_key: jnp.ndarray
   ) -> model.ModelResult:
     """Computes a forward pass of the model on a featurised example."""
+    host_features = featurised_example
+    guidance = self._model_config.heads.diffusion.eval.contact_guidance
+    contact_restraints.validate_input_features(host_features, guidance)
     featurised_example = jax.device_put(
         jax.tree_util.tree_map(
             jnp.asarray, utils.remove_invalidly_typed_feats(featurised_example)
@@ -384,6 +389,10 @@ class ModelRunner:
         result,
     )
     result = dict(result)
+    result['contact_guidance_config'] = contact_restraints.settings_for_batch(
+        host_features, guidance
+    )
+    contact_restraints.validate_inference_result(result, host_features, guidance)
     identifier = self.model_params['__meta__']['__identifier__'].tobytes()
     result['__identifier__'] = identifier
     return result

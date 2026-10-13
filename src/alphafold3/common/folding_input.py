@@ -930,7 +930,7 @@ class Input:
       IDs must be set if there are any bonded atoms. Residue IDs are 1-indexed.
       Atoms in ligands defined by SMILES can't be bonded since SMILES doesn't
       define unique atom names.
-    contact_constraints: Optional upper-bound distance restraints applied by
+    contact_constraints: Optional bounded-distance restraints applied by
       inference-time diffusion guidance. Each endpoint can identify a residue
       or a specific atom within a residue.
     user_ccd: Optional user-defined chemical component dictionary in the CIF
@@ -993,6 +993,19 @@ class Input:
                 f'Invalid residue ID {token[1]} for chain {token[0]!r} in '
                 f'contact constraint {constraint!r}.'
             )
+        if constraint.mobile_endpoint != 'both':
+          if constraint.token1[0] == constraint.token2[0]:
+            raise ValueError('Rigid guidance cannot change an intra-chain distance.')
+          mobile_chain = (
+              constraint.token1 if constraint.mobile_endpoint == 'token1'
+              else constraint.token2
+          )[0]
+          for bond1, bond2 in self.bonded_atom_pairs or ():
+            if bond1[0] != bond2[0] and mobile_chain in (bond1[0], bond2[0]):
+              raise ValueError(
+                  f'Mobile chain {mobile_chain!r} has an inter-chain covalent '
+                  'bond; moving it independently would break that bond.'
+              )
 
     if self.user_ccd is not None:
       for component_name, component_cif in cif_dict.parse_multi_data_cif(
@@ -1521,7 +1534,7 @@ class Input:
             'sequences': sequences,
             'modelSeeds': self.rng_seeds,
             'bondedAtomPairs': self.bonded_atom_pairs,
-            'contactConstraints': contact_constraints,
+            **({'contactConstraints': contact_constraints} if contact_constraints else {}),
             'userCCD': self.user_ccd,
         },
         indent=2,

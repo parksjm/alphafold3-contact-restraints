@@ -11,6 +11,7 @@
 """Diffusion Head."""
 
 from collections.abc import Callable
+import math
 
 from alphafold3.common import base_config
 from alphafold3.model import feat_batch
@@ -99,14 +100,14 @@ class ContactGuidanceConfig(base_config.BaseConfig):
   num_gradient_steps: int = 20
 
   def __post_init__(self):
-    if self.guidance_weight < 0:
-      raise ValueError('guidance_weight must be non-negative.')
-    if self.final_weight_scale < 0:
-      raise ValueError('final_weight_scale must be non-negative.')
-    if self.guidance_interval < 1:
-      raise ValueError('guidance_interval must be at least 1.')
-    if self.num_gradient_steps < 1:
-      raise ValueError('num_gradient_steps must be at least 1.')
+    for name in ('guidance_weight', 'final_weight_scale'):
+      value = getattr(self, name)
+      if not math.isfinite(value) or value < 0:
+        raise ValueError(f'{name} must be finite and non-negative.')
+    for name in ('guidance_interval', 'num_gradient_steps'):
+      value = getattr(self, name)
+      if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError(f'{name} must be a positive integer.')
 
 
 class SampleConfig(base_config.BaseConfig):
@@ -467,12 +468,14 @@ def apply_contact_guidance(
     num_gradient_steps: int,
 ) -> jnp.ndarray:
   """Runs gradient descent on the contact potential for an x0 prediction."""
+  # Legacy unrestrained feature dictionaries have zero-sized restraint arrays.
+  # Do not trace an indexing loop body for them, even under an inactive cond.
+  if constraints.mask.shape[0] == 0:
+    return positions
 
   def guidance_step(step_index, guided_positions):
-    # This intentionally matches Boltz: its contact potential has interval 4,
-    # so a 20-iteration inner loop updates at 0, 4, 8, 12, and 16. The other
-    # iterations allow potentials with different intervals to share that loop;
-    # they are no-ops when contact is the only active potential.
+    # Interval gates whole updates, not just gradient recomputation. The
+    # validated AF3 defaults (interval=1, steps=20) perform 20 updates.
     return jax.lax.cond(
         step_index % guidance_interval == 0,
         lambda x: apply_rigid_chain_contact_guidance(
@@ -536,6 +539,9 @@ def sample(
 
   mask = batch.predicted_structure_info.atom_mask
 
+  def nonfinite_count(x):
+    return jnp.sum((~jnp.isfinite(x)) & mask[..., None])
+
   def apply_denoising_step(carry, scan_input):
     noise_level, step_index = scan_input
     key, positions, noise_level_prev = carry
@@ -553,6 +559,7 @@ def sample(
     positions_noisy = positions + noise
 
     positions_denoised = denoising_step(positions_noisy, t_hat)
+    before_guidance_nonfinite = nonfinite_count(positions_denoised)
 
     guidance_config = config.contact_guidance
     distances_before_guidance = contact_restraint_min_distances(
@@ -593,6 +600,10 @@ def sample(
         distances_after_guidance,
         distances_after_step,
         scheduled_weight,
+        jnp.stack([
+            nonfinite_count(positions_noisy), before_guidance_nonfinite,
+            nonfinite_count(positions_denoised), nonfinite_count(positions_out),
+        ]),
     )
     return (key, positions_out, noise_level), diagnostics
 
@@ -623,6 +634,7 @@ def sample(
       distances_after_guidance,
       distances_after_step,
       guidance_weights,
+      nonfinite_counts,
   ) = diagnostics
 
   final_dense_atom_mask = jnp.tile(mask[None], (num_samples, 1, 1))
@@ -636,4 +648,5 @@ def sample(
       'contact_restraint_distances_after_guidance': distances_after_guidance,
       'contact_restraint_distances_after_step': distances_after_step,
       'contact_guidance_weights': guidance_weights,
+      'contact_guidance_nonfinite_counts': nonfinite_counts,
   }

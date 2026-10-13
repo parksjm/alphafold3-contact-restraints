@@ -16,3 +16,6 @@ src/alphafold3/cpp*.so
 src/alphafold3/OUTPUT_TERMS_OF_USE.md
 src/alphafold3/constants/converters/ccd.pickle
 src/alphafold3/constants/converters/chemical_component_sets.pickle
+
+# Exact recovered production inputs, diagnostics and real-weight regressions.
+contact_recovery_validation_20261013/

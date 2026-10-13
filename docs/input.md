@@ -137,7 +137,7 @@ The fields specify the following:
     These can link atoms within an entity, or across two entities. See more
     below.
 *   `contactConstraints: list[ContactConstraint]`: Optional noncovalent
-    upper-bound distance restraints applied during diffusion sampling. See
+    bounded-distance restraints applied during diffusion sampling. See
     [Contact restraints](#contact-restraints).
 *   `userCCD: str`: An optional string with user-provided chemical components
     dictionary. This is an expert mode for providing custom molecules when
@@ -685,9 +685,10 @@ to move as a rigid body during guidance.
 For `mobileEndpoint: "both"`, the sampler applies Boltz's atom-coordinate
 gradient update to its denoised coordinate estimate. Explicitly mobile chains
 use a fork-specific, capped rigid-body translation/rotation update; this is
-not part of Boltz. Exact axis-angle rotations preserve internal ligand
-geometry, while a nonzero `minDistance` prevents other restraints on the same
-chain from collapsing an already satisfied contact.
+not part of Boltz. Each exact rigid correction preserves the mobile chain's
+internal geometry. A nonzero `minDistance` adds a repulsive correction when
+that contact is evaluated below its lower bound; it does not prevent another
+contact or a subsequent diffusion update from temporarily violating it.
 
 The default schedule uses 20 inner optimization steps at every diffusion step,
 recomputing the contact update at every inner step. The global step size is
@@ -708,6 +709,107 @@ guidance, and after the Euler update are also recorded for validation.
 This is guidance of a model that was not trained with contact-conditioning
 features. Strong or mutually inconsistent restraints can distort local
 geometry; inspect clashes and confidence as well as restraint satisfaction.
+
+### Exact scientific behavior of the recovered implementation
+
+The optimizer is the production implementation from commit `ef5dc91`, recovered
+from **violet**, not the different joint-gradient optimizer in azalea commit
+`bc20b9d`. Recovery and regression evidence are recorded in
+[contact_restraint_validation.md](contact_restraint_validation.md). Standard
+weights are unchanged; contact arrays are not learned conditioning features.
+
+For distances `d_i`, the potential is
+`sum_i weight_i * (max(minDistance_i - d_i, 0) + max(d_i - maxDistance_i, 0))`.
+`d_i` is the hard minimum over selected atom pairs, with a numerical
+`sqrt(squared_distance + 1e-8)` floor. This is flat-bottom **linear**, not
+quadratic; it is piecewise differentiable, not smooth at bounds or tied minima.
+
+Each active inner iteration first takes a Cartesian gradient step for all
+`mobileEndpoint: "both"` contacts. It then processes explicitly mobile contacts
+**sequentially in input order**, recomputing each contact from the coordinates
+left by the previous correction. These are not joint, simultaneous rigid-body
+gradients or cached-gradient steps. Contact order can affect the outcome.
+
+For each explicitly mobile contact, let `g` be the signed unit distance
+gradient times the contact's weight, using the sign appropriate to the mobile
+endpoint. The mobile chain's center is its unweighted valid-atom mean, and `r`
+is the selected mobile atom's lever arm from that center. The update is:
+
+- translation: `-0.5 * scheduled_weight * g`, capped at **0.25 Angstrom**;
+- rotation vector: `0.5 * scheduled_weight * cross(r, -g) / max(dot(r,r), 1)`,
+  capped at **2 degrees** and applied as an exact axis-angle rotation.
+
+These are separate caps, **not** a 0.25-Angstrom maximum displacement for every
+atom. Atoms far from the rotation center can move farther. Only the selected
+chain moves for that correction; the other endpoint's chain is not moved by
+that correction. The protein is not frozen throughout diffusion. There is no
+added steric energy, force-field minimization, monotonic-energy acceptance test,
+or backtracking in this production optimizer. The AF3 denoiser remains the
+structural prior. Do not confuse contact satisfaction with chemical validity.
+
+Guidance acts on the denoised `x0` estimate; gradients do **not** pass through
+the AF3 denoiser. The corrected estimate feeds the standard reverse-Euler
+update, and AF3 continues denoising. Guidance is applied on the **final** step
+too. With the default settings, weight is 0.5 in the first quarter, 0.25 in the
+middle half, and 0.5 in the last quarter (`final_weight_scale=1`). An interval of
+1 gives twenty actual updates per diffusion step. Interval 4 gives only five
+updates in a twenty-iteration loop, not twenty updates with a cached gradient.
+Exact rigidity of a guidance correction does not guarantee rigidity after
+Euler interpolation or later denoising; validate the final geometry separately.
+
+### Chain naming, safeguards and output audit
+
+Endpoints use literal input chain IDs and **1-based chain-local** residue IDs.
+For mature Nyl12: alpha subunits A/B/C/D contain Phe113 and Asn186; beta
+subunits E/F/G/H begin with Thr1 (canonical Thr233). The corresponding sites
+are A/E, B/F, C/G and D/H, with ligand IDs specified explicitly. There is no
+automatic canonical renumbering or automatic symmetry expansion of restraints.
+A/E/I is a useful reduced test; retain E:1, not A:233. Identical-chain
+permutations can still occur in AF3 assembly predictions, so inspect the final
+site relationships rather than assuming chain labels prove pairing.
+
+For the PA6 L4z -> L2 hypothesis at A/E/I, the validated atom-specific block is:
+
+```json
+"contactConstraints": [
+  {"token1": ["E", 1, "OG1"], "token2": ["I", 1, "C12"],
+   "minDistance": 2.5, "maxDistance": 3.2, "mobileEndpoint": "token2"},
+  {"token1": ["A", 113, "N"], "token2": ["I", 1, "O4"],
+   "minDistance": 2.5, "maxDistance": 3.8, "mobileEndpoint": "token2"},
+  {"token1": ["A", 186, "ND2"], "token2": ["I", 1, "O4"],
+   "minDistance": 2.5, "maxDistance": 3.8, "mobileEndpoint": "token2"}
+]
+```
+
+The C12/O4 atom names refer to the production SMILES naming, not arbitrary CCD
+or alternate-file atom names. The four-site input repeats this block for
+B/F/J, C/G/K and D/H/L, yielding twelve contacts for four substrate copies.
+
+For explicitly mobile contacts, intra-chain restraints and mobile chains with
+declared inter-chain covalent bonds are rejected: independently moving those
+chains would either leave the distance invariant or break the bond. No bond
+features are added to implement contacts. Endpoint masks, finite float32 bounds
+and weights, mutated guidance settings, and directly contradictory bounds on
+the same pair are checked before inference. This is not a complete feasibility
+solver for arbitrary mutually inconsistent multi-contact geometry.
+
+Both runners reject nonfinite valid coordinates and fail if **any sample**
+misses **any required contact** at full precision. A zero guidance weight is an
+explicit negative control: finite coordinates are required, contact satisfaction
+is not. Direct model-result extraction also checks the guided outputs. Failure
+is not repaired with a covalent bond, a final coordinate projection, or a
+seed/sample post-filter. Nonfinite diagnostics identify the first step, sample
+and stage (noisy input, denoiser, guidance, or Euler update).
+
+The existing `confidences.json` traces are rounded for display. The additional
+`contact_restraints.json` records full-precision distances and traces, endpoint
+chain/residue/atom identities, lower/upper bounds, weights, mobility and settings
+in input order. Satisfaction checks use unrounded values, without an extra
+tolerance. Neither the restraint score nor AF3 confidence establishes binding
+affinity, catalytic geometry, product specificity or experimentally validated
+activity. Local Cartesian (`"both"`) and residue-minimum modes are experimental;
+the recovered Nyl12 evidence is for atom-specific, explicitly mobile ligand
+chains. Keep those production semantics when reusing the validated protocol.
 
 ## Bonds
 

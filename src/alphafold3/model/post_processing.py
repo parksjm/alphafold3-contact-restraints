@@ -13,6 +13,7 @@
 import dataclasses
 import datetime
 import os
+import json
 
 from alphafold3 import version
 from alphafold3.model import confidence_types
@@ -99,6 +100,11 @@ def write_output(
 
   with open(os.path.join(output_dir, f'{prefix}model.cif'), 'wb') as f:
     f.write(processed_result.cif)
+
+  provenance = inference_result.metadata.get('contact_restraint_provenance')
+  if provenance:
+    with open(os.path.join(output_dir, f'{prefix}contact_restraints.json'), 'w') as f:
+      json.dump(provenance, f, indent=2, allow_nan=False)
 
   with open(
       os.path.join(output_dir, f'{prefix}summary_confidences.json'), 'wb'
