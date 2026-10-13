@@ -1,6 +1,38 @@
 ![header](docs/header.jpg)
 
-# AlphaFold 3
+# AlphaFold 3 with Contact Restraints (Unofficial)
+
+This is an **unofficial repository based on the Kuhlman Lab installation/fork
+of AlphaFold 3**, available at
+[Kuhlman-Lab/alphafold3](https://github.com/Kuhlman-Lab/alphafold3). It has been
+modified to allow **noncovalent contact restraints during inference**, using
+inference-time diffusion guidance. It is not an official release and is not
+endorsed by Kuhlman Lab, Google DeepMind, or the AlphaFold team.
+
+The modifications support atom-specific lower and upper distance bounds and
+explicitly mobile ligand chains. The validated method applies bounded rigid
+translation/rotation corrections during diffusion, including terminal steps;
+it does not implement contacts through covalent bonds or seed/sample
+post-filtering. Standard model weights are used without retraining.
+
+See [contact-restraint inputs and scientific behavior](docs/input.md#contact-restraints)
+and the [recovery and validation report](docs/contact_restraint_validation.md).
+The recovered production algorithm and added safeguards passed 26 focused
+tests; a matched Nyl12 four-ligand test satisfied all 12 configured contact
+bounds with coordinates identical to the recovered production baseline.
+These are bounded regression results, not a guarantee for arbitrary inputs
+or evidence of binding affinity or catalysis. Final geometry and confidence
+still require independent assessment.
+
+Model parameters, local Nyl12 inputs, and local prediction/validation artifacts
+are not included. The upstream source license and model-parameter/output terms
+remain applicable; see [LICENSE](LICENSE),
+[WEIGHTS_TERMS_OF_USE.md](WEIGHTS_TERMS_OF_USE.md), and
+[OUTPUT_TERMS_OF_USE.md](OUTPUT_TERMS_OF_USE.md). For issues specific to these
+modifications, use this repository's issue tracker rather than contacting the
+upstream AlphaFold team.
+
+The original AlphaFold 3 usage information follows.
 
 This package provides an implementation of the inference pipeline of AlphaFold
 3. See below for how to access the model parameters. You may only use AlphaFold
